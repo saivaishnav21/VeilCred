@@ -8,7 +8,7 @@ Built for an Applied Cryptography course project.
 ## Features
 - Pedersen commitments and selective disclosure (done)
 - BBS+ anonymous credentials (done)
-- Range proofs, unlinkability, privacy-preserving revocation (planned)
+- Range proofs(done), unlinkability, privacy-preserving revocation (planned)
 
 ## Run it
     python -m venv .venv
@@ -16,6 +16,7 @@ Built for an Applied Cryptography course project.
     pip install pytest py_ecc
     python demo_phase1.py
     python demo_phase2.py
+    python demo_phase3.py
     python -m pytest -q
 
 ## Disclaimer

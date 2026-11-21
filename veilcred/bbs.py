@@ -89,8 +89,6 @@ def verify(params: BBSParams, pk: G2Point, msgs: Sequence[int], sig: Signature) 
         return False
     B = _commit(params, msgs, sig.s)
     return pairing_product_is_one([(sig.A, pk + sig.e * params.g2), (-B, params.g2)])
-
-
 # ----------------------------- presentations -----------------------------
 @dataclass
 class PredicateProof:
@@ -111,7 +109,18 @@ class Presentation:
     predicate_proofs: List[PredicateProof] = field(default_factory=list)
 
 
-def _statements(params, A_prime, A_bar, d, revealed, commitments):
+# (index of the attribute holding the revocation handle, the verifier's current blacklist)
+Revocation = Tuple[int, Sequence[int]]
+
+
+def _rev_tag(revocation: Optional[Revocation]) -> bytes:
+    if revocation is None:
+        return b""
+    j, revoked = revocation
+    return hashlib.sha256(f"{j}|{','.join(str(h) for h in revoked)}".encode()).digest()
+
+
+def _statements(params, A_prime, A_bar, d, revealed, commitments, revocation=None):
     hidden = [j for j in range(params.n) if j not in revealed]
     st1 = ([-A_prime, params.h0], ["e", "r2"], A_bar - d)
     target2 = params.P1
@@ -120,13 +129,19 @@ def _statements(params, A_prime, A_bar, d, revealed, commitments):
     bases2 = [d, -params.h0] + [-params.h[j] for j in hidden]
     keys2 = ["r3", "s_prime"] + [f"m{j}" for j in hidden]
     stmts = [st1, (bases2, keys2, target2)]
-    # predicate commitments: C_j = m_j*Ga + rho_j*Gb, sharing the secret "m{j}" with statement 2
+    # commitments: C_j = m_j*Ga + rho_j*Gb, sharing the secret "m{j}" with statement 2
     for j in sorted(commitments):
         stmts.append(([params.Ga, params.Gb], [f"m{j}", f"rho{j}"], commitments[j]))
+    # non-revocation: for each blacklisted handle h:  Ga = y*(C - h*Ga) + t*Gb
+    if revocation is not None:
+        j, revoked = revocation
+        for i, handle in enumerate(revoked):
+            Ci = commitments[j] - handle * params.Ga
+            stmts.append(([Ci, params.Gb], [f"inv{i}", f"t{i}"], params.Ga))
     return stmts
 
 
-def _transcript(pk, A_prime, A_bar, d, revealed, context, commitments, pred_list):
+def _transcript(pk, A_prime, A_bar, d, revealed, context, commitments, pred_list, rev_tag=b""):
     tr = Transcript(b"bbs-presentation", order=ORDER)
     tr.append_bytes(b"context", context)          # verifier nonce -> replay protection
     tr.append_bytes(b"pk", pk.encode())
@@ -140,6 +155,7 @@ def _transcript(pk, A_prime, A_bar, d, revealed, context, commitments, pred_list
         tr.append_point(b"C", commitments[j])
     for (i, op, t) in pred_list:                  # the claimed predicates are part of the statement
         tr.append_bytes(b"pred", f"{i}|{op}|{t}".encode())
+    tr.append_bytes(b"rev", rev_tag)              # which blacklist this proof is against
     return tr
 
 
@@ -154,7 +170,8 @@ def _range_context(context: bytes, i: int, op: str, t: int) -> bytes:
 
 def present(params: BBSParams, pk: G2Point, sig: Signature, msgs: Sequence[int],
             reveal: Set[int], context: bytes,
-            predicates: Optional[Sequence[Predicate]] = None) -> Presentation:
+            predicates: Optional[Sequence[Predicate]] = None,
+            revocation: Optional[Revocation] = None) -> Presentation:
     predicates = list(predicates or [])
     pred_attrs = sorted({i for i, _, _ in predicates})
     for i, op, _ in predicates:
@@ -162,6 +179,12 @@ def present(params: BBSParams, pk: G2Point, sig: Signature, msgs: Sequence[int],
             raise ValueError(f"bad predicate on attribute {i}: {op}")
         if i in reveal:
             raise ValueError("a predicate is only meaningful on a HIDDEN attribute")
+    rev_attr = None
+    if revocation is not None:
+        rev_attr = revocation[0]
+        if not (0 <= rev_attr < params.n) or rev_attr in reveal:
+            raise ValueError("the revocation handle must be a HIDDEN attribute")
+    commit_attrs = sorted(set(pred_attrs) | ({rev_attr} if rev_attr is not None else set()))
 
     B = _commit(params, msgs, sig.s)
     r1, r2 = random_scalar(ORDER), random_scalar(ORDER)
@@ -176,9 +199,18 @@ def present(params: BBSParams, pk: G2Point, sig: Signature, msgs: Sequence[int],
     secrets_ = {"e": sig.e, "r2": r2, "r3": r3, "s_prime": s_prime}
     secrets_.update({f"m{j}": msgs[j] % ORDER for j in hidden})
 
-    rho = {i: random_scalar(ORDER) for i in pred_attrs}
-    commitments = {i: msgs[i] % ORDER * params.Ga + rho[i] * params.Gb for i in pred_attrs}
-    secrets_.update({f"rho{i}": rho[i] for i in pred_attrs})
+    rho = {i: random_scalar(ORDER) for i in commit_attrs}
+    commitments = {i: msgs[i] % ORDER * params.Ga + rho[i] * params.Gb for i in commit_attrs}
+    secrets_.update({f"rho{i}": rho[i] for i in commit_attrs})
+
+    if revocation is not None:                    # inverse witnesses for every blacklisted handle
+        for i, handle in enumerate(revocation[1]):
+            x = (msgs[rev_attr] - handle) % ORDER
+            if x == 0:
+                raise ValueError("credential is revoked: its handle is on the blacklist")
+            y = pow(x, -1, ORDER)
+            secrets_[f"inv{i}"] = y
+            secrets_[f"t{i}"] = (-y * rho[rev_attr]) % ORDER
 
     predicate_proofs = []
     for (i, op, t) in predicates:
@@ -192,20 +224,26 @@ def present(params: BBSParams, pk: G2Point, sig: Signature, msgs: Sequence[int],
         predicate_proofs.append(PredicateProof(i, op, t, rp))
 
     pred_list = [(p.index, p.op, p.threshold) for p in predicate_proofs]
-    tr = _transcript(pk, A_prime, A_bar, d, revealed, context, commitments, pred_list)
-    proof = prove_joint(_statements(params, A_prime, A_bar, d, revealed, commitments), secrets_, tr)
+    tr = _transcript(pk, A_prime, A_bar, d, revealed, context, commitments, pred_list,
+                     _rev_tag(revocation))
+    stmts = _statements(params, A_prime, A_bar, d, revealed, commitments, revocation)
+    proof = prove_joint(stmts, secrets_, tr)
     return Presentation(A_prime, A_bar, d, revealed, proof, commitments, predicate_proofs)
 
 
 def verify_presentation(params: BBSParams, pk: G2Point, pres: Presentation, context: bytes,
-                        require: Optional[Sequence[Predicate]] = None) -> bool:
-    """`require` is the VERIFIER's policy: every listed predicate must be proven.
-    (Otherwise a holder could pick easier predicates than the ones the verifier wants.)"""
+                        require: Optional[Sequence[Predicate]] = None,
+                        revocation: Optional[Revocation] = None) -> bool:
+    """`require`    = the VERIFIER's predicate policy (all must be proven).
+    `revocation` = (attribute index, the verifier's CURRENT blacklist); the proof must cover
+    exactly that list, so a stale or shortened list makes verification fail."""
     if any(not (0 <= i < params.n) for i in pres.revealed):
         return False
     if any(not (0 <= v < ORDER) for v in pres.revealed.values()):
         return False
     if any(j in pres.revealed or not (0 <= j < params.n) for j in pres.commitments):
+        return False
+    if revocation is not None and revocation[0] not in pres.commitments:
         return False
     if pres.A_prime.is_infinity:
         return False
@@ -223,8 +261,9 @@ def verify_presentation(params: BBSParams, pk: G2Point, pres: Presentation, cont
         return False
 
     tr = _transcript(pk, pres.A_prime, pres.A_bar, pres.d, pres.revealed, context,
-                     pres.commitments, pred_list)
-    stmts = _statements(params, pres.A_prime, pres.A_bar, pres.d, pres.revealed, pres.commitments)
+                     pres.commitments, pred_list, _rev_tag(revocation))
+    stmts = _statements(params, pres.A_prime, pres.A_bar, pres.d, pres.revealed,
+                        pres.commitments, revocation)
     if not verify_joint(stmts, pres.proof, tr):
         return False
 
