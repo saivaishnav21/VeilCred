@@ -1,0 +1,121 @@
+[
+  {
+    "category": "control",
+    "name": "Honest adult, not revoked",
+    "passed": true,
+    "note": "accepted, as it must be (otherwise the lab would prove nothing)",
+    "seconds": 2.8081586360931396
+  },
+  {
+    "category": "replay",
+    "name": "Replay a captured proof at a different verifier",
+    "passed": true,
+    "note": "proof is bound to the first verifier's nonce",
+    "seconds": 2.254711866378784
+  },
+  {
+    "category": "replay",
+    "name": "Replay the same proof at the same verifier",
+    "passed": true,
+    "note": "needs verifier-side single-use nonces (an application duty)",
+    "seconds": 2.0588440895080566
+  },
+  {
+    "category": "forgery",
+    "name": "Self-issued credential from a rogue issuer",
+    "passed": true,
+    "note": "pairing check e(A',w)=e(Abar,g2) fails under the real issuer key",
+    "seconds": 1.1184639930725098
+  },
+  {
+    "category": "forgery",
+    "name": "Tamper with a disclosed attribute",
+    "passed": true,
+    "note": "disclosed value is part of the proven statement",
+    "seconds": 1.1159930229187012
+  },
+  {
+    "category": "forgery",
+    "name": "Claim an attribute the issuer never signed (CGPA 10.0)",
+    "passed": true,
+    "note": "no valid signature exists for the altered attribute vector",
+    "seconds": 0.9877080917358398
+  },
+  {
+    "category": "forgery",
+    "name": "Splice an adult's birth date into a minor's credential",
+    "passed": true,
+    "note": "mix-and-match across credentials breaks the signature",
+    "seconds": 0.968637228012085
+  },
+  {
+    "category": "forgery",
+    "name": "Degenerate points (A' = A-bar = infinity)",
+    "passed": true,
+    "note": "verifier rejects A' = identity (it would pass the pairing check trivially)",
+    "seconds": 0.9028060436248779
+  },
+  {
+    "category": "forgery",
+    "name": "Malleate the proof (change one response scalar)",
+    "passed": true,
+    "note": "Fiat-Shamir equations no longer hold",
+    "seconds": 1.0629770755767822
+  },
+  {
+    "category": "predicate",
+    "name": "Minor tries to prove age >= 18 honestly",
+    "passed": true,
+    "note": "prover cannot even build the proof (difference is negative)",
+    "seconds": 0.05699920654296875
+  },
+  {
+    "category": "predicate",
+    "name": "Minor wraps a negative difference around 2^32",
+    "passed": true,
+    "note": "bits sum to 2^32-5, not -5, so the sum check fails",
+    "seconds": 0.8377232551574707
+  },
+  {
+    "category": "predicate",
+    "name": "Swap the birth-date commitment for one to a different value",
+    "passed": true,
+    "note": "commitment no longer matches the value the issuer signed",
+    "seconds": 1.0366995334625244
+  },
+  {
+    "category": "predicate",
+    "name": "Minor proves a weaker predicate than the verifier asked for",
+    "passed": true,
+    "note": "verifier policy `require` is not satisfied",
+    "seconds": 0.9558475017547607
+  },
+  {
+    "category": "revocation",
+    "name": "Revoked holder tries to present",
+    "passed": true,
+    "note": "no inverse of (handle - handle) exists, so no proof can be built",
+    "seconds": 0.051140785217285156
+  },
+  {
+    "category": "revocation",
+    "name": "Present against a stale (pre-revocation) blacklist",
+    "passed": true,
+    "note": "proof is bound to the exact list; the verifier's list is newer",
+    "seconds": 0.9875068664550781
+  },
+  {
+    "category": "revocation",
+    "name": "Strip own handle out of the blacklist before proving",
+    "passed": true,
+    "note": "statements are rebuilt from the verifier's own list",
+    "seconds": 1.084944725036621
+  },
+  {
+    "category": "privacy",
+    "name": "Colluding verifiers try to link presentations of the same holder",
+    "passed": true,
+    "note": "VeilCred: 0 linkable pairs; naive 'show the signature' baseline: 6/6 same-holder pairs linked. (Disclosed attributes can still link if they are identifying.)",
+    "seconds": 4.9276206493377686
+  }
+]
