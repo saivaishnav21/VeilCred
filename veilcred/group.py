@@ -20,6 +20,7 @@ ORDER = N  # scalars live in Z_N
 class Point:
     """Affine point on y^2 = x^3 + 7. (None, None) is the point at infinity."""
     __slots__ = ("x", "y")
+    order = N 
 
     def __init__(self, x=None, y=None):
         self.x, self.y = x, y
@@ -87,9 +88,9 @@ INFINITY = Point()
 G = Point(GX, GY)
 
 
-def random_scalar() -> int:
-    """Uniform non-zero scalar in Z_N."""
-    return secrets.randbelow(N - 1) + 1
+def random_scalar(order: int = N) -> int:
+    """Uniform non-zero scalar in Z_order."""
+    return secrets.randbelow(order - 1) + 1
 
 
 def hash_to_point(label: bytes) -> Point:

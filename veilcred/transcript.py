@@ -4,7 +4,8 @@ from .group import N, Point
 
 
 class Transcript:
-    def __init__(self, label: bytes):
+    def __init__(self, label: bytes, order: int = N):
+        self.order = order
         self._h = hashlib.sha512()
         self._absorb(b"veilcred/v1")
         self._absorb(label)
@@ -26,11 +27,11 @@ class Transcript:
             self.append_point(label, p)
 
     def append_scalar(self, label: bytes, s: int):
-        self.append_bytes(label, (s % N).to_bytes(32, "big"))
+        self.append_bytes(label, (s % self.order).to_bytes(32, "big"))
 
     def challenge(self, label: bytes) -> int:
         h = self._h.copy()
         h.update(label)
         digest = h.digest()
         self._absorb(digest)  # chain, so later challenges depend on earlier ones
-        return int.from_bytes(digest, "big") % N
+        return int.from_bytes(digest, "big") % self.order
