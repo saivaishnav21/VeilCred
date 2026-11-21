@@ -12,16 +12,26 @@ Presentation = a *re-randomised* proof of knowledge of a valid signature:
      (1)  Abar - d             = e*(-A') + r2*h0
      (2)  P1 + sum_{revealed} m_i*h_i = r3*d - s'*h0 - sum_{hidden} m_j*h_j
   with r3 = 1/r1 and s' = s - r2*r3.
+
+Phase 3 adds predicates ("dob <= cutoff", "cgpa >= 80") on HIDDEN attributes:
+  the holder commits C_j = m_j*Ga + rho_j*Gb, proves (inside the same joint proof, sharing the
+  secret m_j) that C_j hides the SAME m_j the issuer signed, then range-proves m_j - t >= 0
+  (or t - m_j >= 0) with range_proof.py.
 """
 import hashlib
-from dataclasses import dataclass
-from typing import Dict, List, Sequence, Set
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .group import random_scalar
 from .pairing import (BACKEND, G2_GEN, ORDER, G1Point, G2Point, hash_to_g1,
                       pairing_product_is_one)
+from .range_proof import RangeProof, prove_nonneg, verify_nonneg
 from .sigma import JointProof, prove_joint, verify_joint
 from .transcript import Transcript
+
+
+RANGE_BITS = 32                      # predicate differences must lie in [0, 2^32)
+Predicate = Tuple[int, str, int]     # (attribute index, "ge" | "le", threshold)
 
 
 def encode_attribute(value) -> int:
@@ -39,6 +49,8 @@ class BBSParams:
         self.P1 = hash_to_g1(b"veilcred/bbs/P1")
         self.h0 = hash_to_g1(b"veilcred/bbs/h0")
         self.h = [hash_to_g1(b"veilcred/bbs/h/%d" % i) for i in range(n_attributes)]
+        self.Ga = hash_to_g1(b"veilcred/pred/Ga")   # bases for predicate commitments
+        self.Gb = hash_to_g1(b"veilcred/pred/Gb")
         self.g2 = G2_GEN
 
 
@@ -81,15 +93,25 @@ def verify(params: BBSParams, pk: G2Point, msgs: Sequence[int], sig: Signature) 
 
 # ----------------------------- presentations -----------------------------
 @dataclass
+class PredicateProof:
+    index: int
+    op: str            # "ge": attribute >= threshold   |   "le": attribute <= threshold
+    threshold: int
+    proof: RangeProof
+
+
+@dataclass
 class Presentation:
     A_prime: G1Point
     A_bar: G1Point
     d: G1Point
     revealed: Dict[int, int]
     proof: JointProof
+    commitments: Dict[int, G1Point] = field(default_factory=dict)
+    predicate_proofs: List[PredicateProof] = field(default_factory=list)
 
 
-def _statements(params, A_prime, A_bar, d, revealed):
+def _statements(params, A_prime, A_bar, d, revealed, commitments):
     hidden = [j for j in range(params.n) if j not in revealed]
     st1 = ([-A_prime, params.h0], ["e", "r2"], A_bar - d)
     target2 = params.P1
@@ -97,10 +119,14 @@ def _statements(params, A_prime, A_bar, d, revealed):
         target2 = target2 + m * params.h[i]
     bases2 = [d, -params.h0] + [-params.h[j] for j in hidden]
     keys2 = ["r3", "s_prime"] + [f"m{j}" for j in hidden]
-    return [st1, (bases2, keys2, target2)]
+    stmts = [st1, (bases2, keys2, target2)]
+    # predicate commitments: C_j = m_j*Ga + rho_j*Gb, sharing the secret "m{j}" with statement 2
+    for j in sorted(commitments):
+        stmts.append(([params.Ga, params.Gb], [f"m{j}", f"rho{j}"], commitments[j]))
+    return stmts
 
 
-def _transcript(pk, A_prime, A_bar, d, revealed, context):
+def _transcript(pk, A_prime, A_bar, d, revealed, context, commitments, pred_list):
     tr = Transcript(b"bbs-presentation", order=ORDER)
     tr.append_bytes(b"context", context)          # verifier nonce -> replay protection
     tr.append_bytes(b"pk", pk.encode())
@@ -109,11 +135,34 @@ def _transcript(pk, A_prime, A_bar, d, revealed, context):
     for i in sorted(revealed):
         tr.append_bytes(b"idx", i.to_bytes(4, "big"))
         tr.append_scalar(b"val", revealed[i])
+    for j in sorted(commitments):
+        tr.append_bytes(b"cidx", j.to_bytes(4, "big"))
+        tr.append_point(b"C", commitments[j])
+    for (i, op, t) in pred_list:                  # the claimed predicates are part of the statement
+        tr.append_bytes(b"pred", f"{i}|{op}|{t}".encode())
     return tr
 
 
+def _predicate_commitment(params, C, op: str, t: int):
+    """Commitment to the non-negative difference: m - t  (ge)  or  t - m  (le)."""
+    return C - t * params.Ga if op == "ge" else t * params.Ga - C
+
+
+def _range_context(context: bytes, i: int, op: str, t: int) -> bytes:
+    return context + f"|pred|{i}|{op}|{t}".encode()
+
+
 def present(params: BBSParams, pk: G2Point, sig: Signature, msgs: Sequence[int],
-            reveal: Set[int], context: bytes) -> Presentation:
+            reveal: Set[int], context: bytes,
+            predicates: Optional[Sequence[Predicate]] = None) -> Presentation:
+    predicates = list(predicates or [])
+    pred_attrs = sorted({i for i, _, _ in predicates})
+    for i, op, _ in predicates:
+        if op not in ("ge", "le") or not (0 <= i < params.n):
+            raise ValueError(f"bad predicate on attribute {i}: {op}")
+        if i in reveal:
+            raise ValueError("a predicate is only meaningful on a HIDDEN attribute")
+
     B = _commit(params, msgs, sig.s)
     r1, r2 = random_scalar(ORDER), random_scalar(ORDER)
     r3 = pow(r1, -1, ORDER)
@@ -127,16 +176,36 @@ def present(params: BBSParams, pk: G2Point, sig: Signature, msgs: Sequence[int],
     secrets_ = {"e": sig.e, "r2": r2, "r3": r3, "s_prime": s_prime}
     secrets_.update({f"m{j}": msgs[j] % ORDER for j in hidden})
 
-    tr = _transcript(pk, A_prime, A_bar, d, revealed, context)
-    proof = prove_joint(_statements(params, A_prime, A_bar, d, revealed), secrets_, tr)
-    return Presentation(A_prime, A_bar, d, revealed, proof)
+    rho = {i: random_scalar(ORDER) for i in pred_attrs}
+    commitments = {i: msgs[i] % ORDER * params.Ga + rho[i] * params.Gb for i in pred_attrs}
+    secrets_.update({f"rho{i}": rho[i] for i in pred_attrs})
+
+    predicate_proofs = []
+    for (i, op, t) in predicates:
+        diff = msgs[i] - t if op == "ge" else t - msgs[i]
+        if not (0 <= diff < 2 ** RANGE_BITS):
+            raise ValueError(f"predicate not satisfied: attribute {i} {op} {t}")
+        rho_d = rho[i] if op == "ge" else (-rho[i]) % ORDER
+        Cd = _predicate_commitment(params, commitments[i], op, t)
+        rp = prove_nonneg(params.Ga, params.Gb, diff, rho_d, RANGE_BITS, Cd,
+                          _range_context(context, i, op, t))
+        predicate_proofs.append(PredicateProof(i, op, t, rp))
+
+    pred_list = [(p.index, p.op, p.threshold) for p in predicate_proofs]
+    tr = _transcript(pk, A_prime, A_bar, d, revealed, context, commitments, pred_list)
+    proof = prove_joint(_statements(params, A_prime, A_bar, d, revealed, commitments), secrets_, tr)
+    return Presentation(A_prime, A_bar, d, revealed, proof, commitments, predicate_proofs)
 
 
-def verify_presentation(params: BBSParams, pk: G2Point, pres: Presentation,
-                        context: bytes) -> bool:
+def verify_presentation(params: BBSParams, pk: G2Point, pres: Presentation, context: bytes,
+                        require: Optional[Sequence[Predicate]] = None) -> bool:
+    """`require` is the VERIFIER's policy: every listed predicate must be proven.
+    (Otherwise a holder could pick easier predicates than the ones the verifier wants.)"""
     if any(not (0 <= i < params.n) for i in pres.revealed):
         return False
     if any(not (0 <= v < ORDER) for v in pres.revealed.values()):
+        return False
+    if any(j in pres.revealed or not (0 <= j < params.n) for j in pres.commitments):
         return False
     if pres.A_prime.is_infinity:
         return False
@@ -145,6 +214,23 @@ def verify_presentation(params: BBSParams, pk: G2Point, pres: Presentation,
     # A' is a genuine randomisation of an issuer signature:  e(A', w) == e(Abar, g2)
     if not pairing_product_is_one([(pres.A_prime, pk), (-pres.A_bar, params.g2)]):
         return False
-    tr = _transcript(pk, pres.A_prime, pres.A_bar, pres.d, pres.revealed, context)
-    return verify_joint(_statements(params, pres.A_prime, pres.A_bar, pres.d, pres.revealed),
-                        pres.proof, tr)
+
+    pred_list = [(p.index, p.op, p.threshold) for p in pres.predicate_proofs]
+    if any(p.op not in ("ge", "le") or p.index not in pres.commitments
+           for p in pres.predicate_proofs):
+        return False
+    if require is not None and not set(require) <= set(pred_list):
+        return False
+
+    tr = _transcript(pk, pres.A_prime, pres.A_bar, pres.d, pres.revealed, context,
+                     pres.commitments, pred_list)
+    stmts = _statements(params, pres.A_prime, pres.A_bar, pres.d, pres.revealed, pres.commitments)
+    if not verify_joint(stmts, pres.proof, tr):
+        return False
+
+    for p in pres.predicate_proofs:
+        Cd = _predicate_commitment(params, pres.commitments[p.index], p.op, p.threshold)
+        if not verify_nonneg(params.Ga, params.Gb, Cd, p.proof, RANGE_BITS,
+                             _range_context(context, p.index, p.op, p.threshold)):
+            return False
+    return True
