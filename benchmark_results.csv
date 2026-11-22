@@ -1,0 +1,16 @@
+experiment,parameter,prove_ms,verify_ms,proof_bytes,group_elements,scalars
+primitive,G1 scalar mult,,5.3,,,
+primitive,pairing check (2 pairings),,143.6,,,
+primitive,hash to G1,,6.3,,,
+primitive,BBS+ sign (5 attrs),,24.6,,,
+primitive,BBS+ verify (5 attrs),,223.2,,,
+attributes,5,102.3,288.5,496,5,8
+attributes,10,154.3,289.6,656,5,13
+attributes,20,266.8,325.1,976,5,23
+predicates,0,93.2,268.3,496,5,8
+predicates,1,808.9,1113.7,9328,103,137
+predicates,2,1529.7,1941.7,18160,201,266
+blacklist,0,811.9,1116.4,9456,105,138
+blacklist,5,874.2,1252.8,10016,110,148
+blacklist,10,963.6,1410.7,10576,115,158
+blacklist,20,1085.3,1692.5,11696,125,178
